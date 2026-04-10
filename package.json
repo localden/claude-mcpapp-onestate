@@ -1,0 +1,19 @@
+{
+  "name": "mcp-widget-supersede-sample",
+  "version": "1.0.0",
+  "description": "Demo: using BroadcastChannel to supersede older MCP App widget instances when the same tool is called multiple times in a conversation.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.0",
+    "@modelcontextprotocol/ext-apps": "^1.2.2",
+    "express": "^5.1.0",
+    "zod": "^3.25.0"
+  }
+}

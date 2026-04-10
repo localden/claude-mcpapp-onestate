@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cart Widget</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      padding: 12px;
+      background: transparent;
+    }
+    .card {
+      border: 3px solid #16a34a;
+      border-radius: 12px;
+      padding: 16px;
+      background: #f0fdf4;
+      transition: all .15s ease;
+    }
+    .card.superseded {
+      border-color: #d4d4d4;
+      background: #fafafa;
+      opacity: 0.7;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .title { font-size: 16px; font-weight: 600; color: #1a1a1a; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: #16a34a;
+      color: white;
+    }
+    .badge::before {
+      content: "";
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: #fff;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+    .card.superseded .badge { background: #a3a3a3; }
+    .card.superseded .badge::before { animation: none; opacity: .6; }
+    .banner {
+      display: none;
+      margin-bottom: 12px;
+      padding: 8px 12px;
+      background: #e5e5e5;
+      border-radius: 6px;
+      font-size: 13px;
+      color: #525252;
+    }
+    .card.superseded .banner { display: block; }
+    ul { list-style: none; margin-bottom: 12px; }
+    li {
+      padding: 8px 10px;
+      background: white;
+      border: 1px solid #e5e5e5;
+      border-radius: 6px;
+      margin-bottom: 6px;
+      font-size: 14px;
+    }
+    .empty { font-size: 13px; color: #737373; padding: 8px 0 12px; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    button {
+      padding: 8px 14px;
+      font-size: 13px;
+      font-weight: 500;
+      border: none;
+      border-radius: 6px;
+      background: #16a34a;
+      color: white;
+      cursor: pointer;
+    }
+    button.secondary { background: #525252; }
+    button:hover { filter: brightness(1.1); }
+    button:disabled {
+      background: #d4d4d4;
+      color: #737373;
+      cursor: not-allowed;
+    }
+    .meta {
+      margin-top: 10px;
+      font-size: 10px;
+      color: #a3a3a3;
+      font-family: ui-monospace, monospace;
+    }
+  </style>
+</head>
+<body>
+  <div id="card" class="card">
+    <div class="header">
+      <span class="title">🛒 Your cart</span>
+      <span id="badge" class="badge">Live</span>
+    </div>
+    <div class="banner">⬇&nbsp; Superseded — see the latest cart below.</div>
+    <ul id="items"></ul>
+    <div id="empty" class="empty">Cart is empty.</div>
+    <div class="actions">
+      <button id="addBtn">+ Add item</button>
+      <button id="tellBtn" class="secondary">Tell Claude about my cart</button>
+    </div>
+    <div id="meta" class="meta"></div>
+  </div>
+
+  <script type="module">
+    // ─────────────────────────────────────────────────────────────────────
+    // Minimal MCP Apps host bridge (raw JSON-RPC over window.postMessage).
+    // Kept inline so this widget has zero external dependencies / no CSP.
+    // ─────────────────────────────────────────────────────────────────────
+    const host = (() => {
+      let nextId = 1;
+      const pending = new Map();
+      const notificationHandlers = new Map();
+
+      window.addEventListener("message", (event) => {
+        const data = event.data;
+        if (!data || data.jsonrpc !== "2.0") return;
+        if (Object.prototype.hasOwnProperty.call(data, "id") && (data.result !== undefined || data.error !== undefined)) {
+          const p = pending.get(data.id);
+          if (p) {
+            pending.delete(data.id);
+            data.error ? p.reject(new Error(data.error?.message || JSON.stringify(data.error))) : p.resolve(data.result);
+          }
+        } else if (data.method) {
+          const h = notificationHandlers.get(data.method);
+          if (h) h(data.params);
+        }
+      });
+
+      return {
+        request(method, params) {
+          const id = nextId++;
+          return new Promise((resolve, reject) => {
+            pending.set(id, { resolve, reject });
+            window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+          });
+        },
+        notify(method, params) {
+          window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*");
+        },
+        on(method, handler) {
+          notificationHandlers.set(method, handler);
+        },
+      };
+    })();
+
+    function autoResize() {
+      const send = () => {
+        const r = document.body.getBoundingClientRect();
+        host.notify("ui/notifications/size-changed", {
+          width: Math.ceil(r.width),
+          height: Math.ceil(r.height),
+        });
+      };
+      new ResizeObserver(send).observe(document.body);
+      send();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Widget state
+    // ─────────────────────────────────────────────────────────────────────
+    const CATALOG = ["Avocados", "Bananas", "Sourdough", "Oat milk", "Greek yogurt", "Cold brew", "Pasta", "Olive oil"];
+    let items = [];
+    let superseded = false;
+    let instanceId = (crypto?.randomUUID?.() ?? String(Math.random()).slice(2));
+    const bornAt = Date.now();
+
+    const el = {
+      card: document.getElementById("card"),
+      badge: document.getElementById("badge"),
+      items: document.getElementById("items"),
+      empty: document.getElementById("empty"),
+      addBtn: document.getElementById("addBtn"),
+      tellBtn: document.getElementById("tellBtn"),
+      meta: document.getElementById("meta"),
+    };
+
+    function render() {
+      el.items.replaceChildren(...items.map((it) => {
+        const li = document.createElement("li");
+        li.textContent = it;
+        return li;
+      }));
+      el.empty.style.display = items.length ? "none" : "block";
+      el.card.classList.toggle("superseded", superseded);
+      el.badge.textContent = superseded ? "Superseded" : "Live";
+      el.addBtn.disabled = superseded;
+      el.tellBtn.disabled = superseded;
+      el.meta.textContent = `instance ${String(instanceId).slice(0, 12)} · born ${new Date(bornAt).toLocaleTimeString()}`;
+    }
+
+    function supersede() {
+      if (superseded) return;
+      superseded = true;
+      render();
+      console.log("[cart-widget]", instanceId, "→ superseded");
+    }
+
+    // Gate all host-mutating calls on !superseded
+    function updateModelContext() {
+      if (superseded) return;
+      host.request("ui/update-model-context", {
+        content: [{
+          type: "text",
+          text: `The user's cart widget currently shows ${items.length} item(s): ${items.join(", ") || "(empty)"}.`,
+        }],
+      }).catch((e) => console.warn("[cart-widget] updateModelContext failed:", e.message));
+    }
+
+    el.addBtn.addEventListener("click", () => {
+      if (superseded) return;
+      items.push(CATALOG[Math.floor(Math.random() * CATALOG.length)]);
+      render();
+      updateModelContext();
+    });
+
+    el.tellBtn.addEventListener("click", () => {
+      if (superseded) return;
+      host.request("ui/message", {
+        role: "user",
+        content: [{ type: "text", text: `My cart now has: ${items.join(", ") || "nothing"}.` }],
+      }).catch((e) => console.warn("[cart-widget] ui/message failed:", e.message));
+    });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Supersede protocol over BroadcastChannel.
+    //
+    // All widget iframes for a given connector share an origin on
+    // *.claudemcpcontent.com (sandbox="allow-same-origin"), so a
+    // BroadcastChannel reaches every instance in the conversation.
+    //
+    // Each instance announces {instanceId, bornAt} on mount. Any instance
+    // that sees a sibling with a later bornAt marks itself superseded and
+    // stops calling ui/update-model-context and ui/message.
+    // ─────────────────────────────────────────────────────────────────────
+    const channel = new BroadcastChannel("mcp-demo-cart-supersede");
+
+    function isYounger(other) {
+      if (other.bornAt !== bornAt) return other.bornAt > bornAt;
+      // Deterministic tiebreak if two instances mount in the same ms
+      return String(other.instanceId) > String(instanceId);
+    }
+
+    channel.onmessage = (ev) => {
+      const msg = ev.data;
+      if (!msg || msg.instanceId === instanceId) return;
+      if (msg.type === "hello") {
+        // A newly mounted (or reloaded) sibling is asking who's out there.
+        // Reply so it can supersede itself if we're younger than it.
+        channel.postMessage({ type: "born", instanceId, bornAt });
+        if (isYounger(msg)) supersede();
+      } else if (msg.type === "born") {
+        if (isYounger(msg)) supersede();
+      }
+    };
+
+    function announce() {
+      // "hello" asks existing instances to re-announce; "born" is our own birth.
+      channel.postMessage({ type: "hello", instanceId, bornAt });
+      channel.postMessage({ type: "born", instanceId, bornAt });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Host handshake
+    // ─────────────────────────────────────────────────────────────────────
+    host.on("ui/notifications/tool-input", (params) => {
+      const arg = params?.arguments?.items;
+      if (Array.isArray(arg)) {
+        items = arg.map(String);
+        render();
+        updateModelContext();
+      }
+    });
+
+    host.on("ui/notifications/tool-result", (params) => {
+      const sc = params?.structuredContent;
+      if (sc && Array.isArray(sc.items) && items.length === 0) {
+        items = sc.items.map(String);
+        render();
+        updateModelContext();
+      }
+    });
+
+    (async () => {
+      render();
+      try {
+        const init = await host.request("ui/initialize", {
+          protocolVersion: "2026-01-26",
+          appInfo: { name: "CartSupersedeDemo", version: "1.0.0" },
+          appCapabilities: {},
+        });
+        const hostInstanceId = init?.hostContext?.toolInfo?.id;
+        if (hostInstanceId !== undefined && hostInstanceId !== null) {
+          instanceId = hostInstanceId;
+        }
+        host.notify("ui/notifications/initialized", {});
+      } catch (e) {
+        console.warn("[cart-widget] ui/initialize failed (running outside a host?):", e.message);
+      }
+      render();
+      autoResize();
+      announce();
+    })();
+  </script>
+</body>
+</html>
