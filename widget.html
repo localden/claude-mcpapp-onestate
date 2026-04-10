@@ -177,7 +177,24 @@
     let items = [];
     let superseded = false;
     let instanceId = (crypto?.randomUUID?.() ?? String(Math.random()).slice(2));
-    const bornAt = Date.now();
+    // bornAt is provisional until we learn toolInfo.id from the host — then
+    // we persist/restore it from localStorage so a reload of this iframe
+    // reuses its original birth time instead of stealing "live" from a
+    // genuinely newer instance (see README "reload ordering").
+    let bornAt = Date.now();
+
+    const BORN_AT_KEY = (id) => `mcp-demo-cart:bornAt:${id}`;
+    function resolveBornAt(id) {
+      try {
+        const stored = localStorage.getItem(BORN_AT_KEY(id));
+        if (stored !== null) {
+          const t = Number(stored);
+          if (Number.isFinite(t)) return t;
+        }
+        localStorage.setItem(BORN_AT_KEY(id), String(bornAt));
+      } catch { /* storage unavailable — fall back to Date.now() */ }
+      return bornAt;
+    }
 
     const el = {
       card: document.getElementById("card"),
@@ -306,6 +323,7 @@
         const hostInstanceId = init?.hostContext?.toolInfo?.id;
         if (hostInstanceId !== undefined && hostInstanceId !== null) {
           instanceId = hostInstanceId;
+          bornAt = resolveBornAt(instanceId);
         }
         host.notify("ui/notifications/initialized", {});
       } catch (e) {
