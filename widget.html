@@ -177,23 +177,35 @@
     let items = [];
     let superseded = false;
     let instanceId = (crypto?.randomUUID?.() ?? String(Math.random()).slice(2));
-    // bornAt is provisional until we learn toolInfo.id from the host — then
-    // we persist/restore it from localStorage so a reload of this iframe
-    // reuses its original birth time instead of stealing "live" from a
-    // genuinely newer instance (see README "reload ordering").
-    let bornAt = Date.now();
 
-    const BORN_AT_KEY = (id) => `mcp-demo-cart:bornAt:${id}`;
-    function resolveBornAt(id) {
+    // Election key. Preferred source is the *server-minted* {createdAt, seq}
+    // from the tool result's structuredContent — that reflects tool-call
+    // order and is stored in the conversation transcript, so it's identical
+    // on every device and every remount. Client mount time (Date.now()) is
+    // only a last-resort fallback; on mobile rehydration, cells can mount
+    // out of transcript order, which would invert the election.
+    let orderKey = Date.now();   // primary comparable (server createdAt when available)
+    let seq = undefined;          // server's monotonic counter; same-ms tiebreak
+    let keySource = "client";    // "server" | "cache" | "client" — for the debug footer
+    let keyFinalized = false;     // gate: ignore channel traffic until the key is settled
+
+    // Resolved when ui/notifications/tool-result delivers the server key.
+    let serverKeyResolve;
+    const serverKeyReady = new Promise((r) => { serverKeyResolve = r; });
+
+    const ELECTION_KEY = (id) => `mcp-demo-cart:election:${id}`;
+    function loadCachedKey(id) {
       try {
-        const stored = localStorage.getItem(BORN_AT_KEY(id));
-        if (stored !== null) {
-          const t = Number(stored);
-          if (Number.isFinite(t)) return t;
-        }
-        localStorage.setItem(BORN_AT_KEY(id), String(bornAt));
-      } catch { /* storage unavailable — fall back to Date.now() */ }
-      return bornAt;
+        const raw = localStorage.getItem(ELECTION_KEY(id));
+        if (!raw) return null;
+        const k = JSON.parse(raw);
+        if (k && Number.isFinite(k.orderKey)) return k;
+      } catch { /* ignore */ }
+      return null;
+    }
+    function persistKey(id) {
+      try { localStorage.setItem(ELECTION_KEY(id), JSON.stringify({ orderKey, seq })); }
+      catch { /* storage unavailable */ }
     }
 
     const el = {
@@ -217,14 +229,26 @@
       el.badge.textContent = superseded ? "Superseded" : "Live";
       el.addBtn.disabled = superseded;
       el.tellBtn.disabled = superseded;
-      el.meta.textContent = `instance ${String(instanceId).slice(0, 12)} · born ${new Date(bornAt).toLocaleTimeString()}`;
+      el.meta.textContent = `instance ${String(instanceId).slice(0, 12)} · ${seq != null ? `#${seq} · ` : ""}${new Date(orderKey).toLocaleTimeString()} (${keySource})`;
     }
 
-    function supersede() {
-      if (superseded) return;
-      superseded = true;
+    // Last-known ticket from every sibling, keyed by their instanceId.
+    // Superseded is recomputed from this map so it can flip back to live
+    // if a late-arriving server key changes the ordering.
+    const peers = new Map();
+
+    // "server" and "cache" are both server-authoritative (cache is a
+    // persisted server key). "client" is a different clock domain and
+    // must not be compared against server values.
+    const isAuthoritative = (src) => src === "server" || src === "cache";
+
+    function recomputeSuperseded() {
+      const next = [...peers.values()].some(isYounger);
+      if (next !== superseded) {
+        superseded = next;
+        console.log("[cart-widget]", instanceId, next ? "→ superseded" : "→ live");
+      }
       render();
-      console.log("[cart-widget]", instanceId, "→ superseded");
     }
 
     // Gate all host-mutating calls on !superseded
@@ -260,35 +284,46 @@
     // *.claudemcpcontent.com (sandbox="allow-same-origin"), so a
     // BroadcastChannel reaches every instance in the conversation.
     //
-    // Each instance announces {instanceId, bornAt} on mount. Any instance
-    // that sees a sibling with a later bornAt marks itself superseded and
-    // stops calling ui/update-model-context and ui/message.
+    // Each instance announces its server-minted {orderKey, seq} once that
+    // key is finalized. Any instance that sees a sibling with a later key
+    // marks itself superseded and stops calling ui/update-model-context
+    // and ui/message. Messages received before our own key is finalized
+    // are ignored — our announce() will trigger a fresh hello/born
+    // exchange once we're ready.
     // ─────────────────────────────────────────────────────────────────────
     const channel = new BroadcastChannel("mcp-demo-cart-supersede");
 
+    const ticket = () => ({ instanceId, orderKey, seq, keySource });
+
     function isYounger(other) {
-      if (other.bornAt !== bornAt) return other.bornAt > bornAt;
-      // Deterministic tiebreak if two instances mount in the same ms
+      // Never supersede across clock domains — a client Date.now() and a
+      // server createdAt aren't comparable (server value may be hours old
+      // on a rehydrated chat). Wait for both sides to be authoritative.
+      if (isAuthoritative(other.keySource) !== isAuthoritative(keySource)) return false;
+      // Primary: createdAt / bornAt within the same domain.
+      if (other.orderKey !== orderKey) return other.orderKey > orderKey;
+      // Same-ms tiebreak: server's monotonic counter, when both have it.
+      if (other.seq != null && seq != null && other.seq !== seq) return other.seq > seq;
+      // Final deterministic tiebreak.
       return String(other.instanceId) > String(instanceId);
     }
 
     channel.onmessage = (ev) => {
       const msg = ev.data;
       if (!msg || msg.instanceId === instanceId) return;
+      if (!keyFinalized) return; // we'll announce() once ready; peers reply then
       if (msg.type === "hello") {
-        // A newly mounted (or reloaded) sibling is asking who's out there.
-        // Reply so it can supersede itself if we're younger than it.
-        channel.postMessage({ type: "born", instanceId, bornAt });
-        if (isYounger(msg)) supersede();
-      } else if (msg.type === "born") {
-        if (isYounger(msg)) supersede();
+        channel.postMessage({ type: "born", ...ticket() });
+      }
+      if (msg.type === "hello" || msg.type === "born") {
+        peers.set(msg.instanceId, msg);
+        recomputeSuperseded();
       }
     };
 
     function announce() {
-      // "hello" asks existing instances to re-announce; "born" is our own birth.
-      channel.postMessage({ type: "hello", instanceId, bornAt });
-      channel.postMessage({ type: "born", instanceId, bornAt });
+      channel.postMessage({ type: "hello", ...ticket() });
+      channel.postMessage({ type: "born", ...ticket() });
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -305,15 +340,24 @@
 
     host.on("ui/notifications/tool-result", (params) => {
       const sc = params?.structuredContent;
-      if (sc && Array.isArray(sc.items) && items.length === 0) {
+      if (!sc) return;
+      if (Array.isArray(sc.items) && items.length === 0) {
         items = sc.items.map(String);
-        render();
-        updateModelContext();
       }
+      if (Number.isFinite(sc.createdAt)) {
+        // Server-authoritative election key arrives here. Finalize/announce
+        // is driven from the init IIFE below via serverKeyReady.
+        serverKeyResolve({ orderKey: sc.createdAt, seq: Number.isFinite(sc.seq) ? sc.seq : undefined });
+      }
+      render();
+      updateModelContext();
     });
+
+    const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
     (async () => {
       render();
+      let hasStableId = false;
       try {
         const init = await host.request("ui/initialize", {
           protocolVersion: "2026-01-26",
@@ -321,17 +365,55 @@
           appCapabilities: {},
         });
         const hostInstanceId = init?.hostContext?.toolInfo?.id;
+        // iOS returns nil for toolInfo.id when rehydrating a stored
+        // conversation, so hasStableId stays false there and the
+        // localStorage cache is skipped entirely — the server key from
+        // tool-result is the only ordering source that works on iOS.
         if (hostInstanceId !== undefined && hostInstanceId !== null) {
           instanceId = hostInstanceId;
-          bornAt = resolveBornAt(instanceId);
+          hasStableId = true;
         }
         host.notify("ui/notifications/initialized", {});
       } catch (e) {
         console.warn("[cart-widget] ui/initialize failed (running outside a host?):", e.message);
       }
+
+      // Finalize the election key. Prefer the server-minted value from
+      // tool-result; if it hasn't arrived within 1s, fall back to a cached
+      // copy from a previous mount, else to the client-side provisional.
+      const serverKey = await Promise.race([serverKeyReady, delay(1000).then(() => null)]);
+      if (serverKey) {
+        orderKey = serverKey.orderKey;
+        seq = serverKey.seq;
+        keySource = "server";
+      } else if (hasStableId) {
+        const cached = loadCachedKey(instanceId);
+        if (cached) {
+          orderKey = cached.orderKey;
+          seq = cached.seq;
+          keySource = "cache";
+        }
+      }
+      if (hasStableId) persistKey(instanceId);
+      keyFinalized = true;
+
       render();
       autoResize();
       announce();
+
+      // If the server key arrives after the timeout, adopt it, re-evaluate
+      // against known peers (we may flip back to live), and re-announce so
+      // peers update their view of us.
+      if (!serverKey) {
+        serverKeyReady.then((k) => {
+          orderKey = k.orderKey;
+          seq = k.seq;
+          keySource = "server";
+          if (hasStableId) persistKey(instanceId);
+          recomputeSuperseded();
+          announce();
+        });
+      }
     })();
   </script>
 </body>

@@ -23,6 +23,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WIDGET_HTML = fs.readFileSync(path.join(__dirname, "widget.html"), "utf-8");
 const WIDGET_URI = "ui://supersede-demo/cart.html";
 
+// Monotonic per-process call counter. Returned in structuredContent so the
+// widget can order instances by *tool-call order* rather than client mount
+// time — which is unreliable on mobile rehydration / lazy-scroll (see README).
+// A production server would persist this (DB row id, logical clock, etc.).
+let callSeq = 0;
+
 /**
  * Build a fresh McpServer for a single request.
  * We run Streamable HTTP in stateless mode (no session id), which is the
@@ -51,6 +57,8 @@ function buildServer() {
     },
     async ({ items }) => {
       const list = Array.isArray(items) ? items : [];
+      const seq = ++callSeq;
+      const createdAt = Date.now();
       return {
         content: [
           {
@@ -61,7 +69,11 @@ function buildServer() {
                 : "Cart rendered (empty).",
           },
         ],
-        structuredContent: { items: list },
+        // createdAt (server wall clock) is the primary election key the
+        // widget uses; seq is a same-ms tiebreak. Both persist in the
+        // conversation transcript, so rehydrated widgets on any device
+        // recover the same ordering.
+        structuredContent: { items: list, seq, createdAt },
       };
     },
   );
