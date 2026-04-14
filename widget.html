@@ -365,7 +365,7 @@
           appCapabilities: {},
         });
         const hostInstanceId = init?.hostContext?.toolInfo?.id;
-        // iOS returns nil for toolInfo.id when rehydrating a stored
+        // iOS returns undefined for toolInfo.id when rehydrating a stored
         // conversation, so hasStableId stays false there and the
         // localStorage cache is skipped entirely — the server key from
         // tool-result is the only ordering source that works on iOS.
