@@ -394,7 +394,7 @@
           keySource = "cache";
         }
       }
-      if (hasStableId) persistKey(instanceId);
+      if (hasStableId && keySource !== "client") persistKey(instanceId);
       keyFinalized = true;
 
       render();
