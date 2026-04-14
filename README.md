@@ -4,7 +4,7 @@
 
 When Claude calls an MCP tool that renders an [MCP App](https://github.com/modelcontextprotocol/ext-apps) widget more than once in a conversation, each call produces a **separate iframe**. There's currently no host API to unmount or disable earlier instances when a newer one appears — so you can end up with several "live" copies of the same widget, each pushing its own `ui/update-model-context` / `ui/message` calls.
 
-## The workaround this demo shows
+## How it works
 
 All widget iframes for a given connector are served from the **same origin** on `*.claudemcpcontent.com` (the iframe sandbox includes `allow-same-origin`). That means a [`BroadcastChannel`](https://developer.mozilla.org/docs/Web/API/BroadcastChannel) reaches every instance in the conversation.
 
@@ -63,7 +63,6 @@ See `widget.html`, the section marked *"Supersede protocol over BroadcastChannel
 
 ## Notes
 
-- This is a **workaround**, not a spec feature. If/when the host grows an API for widget lifecycle (e.g. `ui/notifications/instance-superseded`), prefer that.
 - `BroadcastChannel` is same-origin only — it works here because Claude.ai gives all iframes from a connector the same sandbox origin. Other hosts may differ.
 - **Channel scope & `ui.domain`:** with no `_meta.ui.domain` set (as in this demo), Claude.ai derives the iframe origin from *conversation + connector*, so the broadcast is scoped to one conversation. If you set a fixed `ui.domain` (common for OAuth callbacks), the origin becomes **per-connector across all conversations and tabs** — a fixed channel name would then let a cart in one conversation supersede a cart in another. In that case, namespace the channel (e.g. by tool name and a conversation-scoped value if one is available) or accept "newest across all tabs" semantics.
 - **Why the election key is server-minted, not client `Date.now()`:** client mount time does *not* reflect tool-call order. On iOS, a rehydrated conversation is bottom-anchored and lazy-mounts older cells as you scroll up — so older widgets mount *later* and a client timestamp would hand them "live." Opening the same chat on a second device has the same problem (fresh `localStorage`, fresh clocks). The server's `{createdAt, seq}` travels with the tool result in the transcript and is identical everywhere. The widget waits (up to 1s) for `ui/notifications/tool-result` before announcing, then re-announces if the authoritative value arrives late. A production server would source the key from something durable (DB row id, cart version, logical clock) rather than an in-process counter.
